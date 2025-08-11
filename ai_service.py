@@ -18,6 +18,8 @@ import pickle
 import cv2
 from PIL import Image
 import tempfile
+import requests
+import time
 
 app = Flask(__name__)
 base_dir = os.path.dirname(__file__)
@@ -36,13 +38,23 @@ YOUTUBE_API_VERSION = "v3"
 YOUTUBE_CREDENTIALS_FILE = "youtube_credentials.pickle"  # Store your OAuth2 credentials here
 
 # INSTAGRAM CREDENTIALS:
-INSTAGRAM_ACCESS_TOKEN = "IGAARDZCEVjlFRBZAE1zc0FzRHZAsek94cFBuNnp0TkR2VWwtckFoME1Ub2syTEoxM0tiR2c5c3B6M28yMEEzY3ZAaUXF3ZAzUwREJlbGRNc1VlanZA4Q21pX01kc3NTQ0c3TUpMdk12cm5HZAW5FUTRDcDhSaHZARWTFaaUg1UnN6LUxycwZDZD"  # Get this from Facebook Developer Console
-INSTAGRAM_ACCOUNT_ID = "30657471253901006"
-INSTAGRAM_API_BASE = "https://graph.facebook.com/v18.0"
+INSTAGRAM_ACCESS_TOKEN = "EAFdJxYmS8OgBPGn7lkXvQa95sv8caZAyVrXXZC0JK1m0eqntjYkr1LB7swBcgVRhAsjCUFpZCXhK58r50kk0a7jH8gWdcTUJVLCu1G2Eb2M7Ks52adG1CQBZBtPtURmscZCySSzraQVUPZCZADKPM8lTv9cEvesvQipuQMSUTZBUpdhtAcZB6nYOyFTCEZC4ZARIe0ZBm84izpBZB"  # <-- Page token for "Vana Bana"
+INSTAGRAM_ACCOUNT_ID = "17841476320877826"
+INSTAGRAM_API_BASE = "https://graph.facebook.com/v23.0"
 
 # GCS CREDENTIALS:
-
+GCS_CREDENTIALS_PATH = "/Users/diegogutierrez/Desktop/reddit-video-service/fast-tensor-467015-t9-2e032de3f47f.json"
 GCS_BUCKET_NAME = "reddit-audio-n8n"
+
+# TESTING SCRIPTS
+
+def test_instagram_token():
+    import requests
+    response = requests.get(
+        f"{INSTAGRAM_API_BASE}/{INSTAGRAM_ACCOUNT_ID}",
+        params={"fields": "id,username", "access_token": INSTAGRAM_ACCESS_TOKEN}
+    )
+    print(response.json())  # Should return your account info
 
 
 # --- LOADING AND CHECKING PROCESSED STORIES ---
@@ -64,49 +76,74 @@ def save_processed_stories(data):
 
 
 def is_story_processed(story_id, permalink, url, platform=None):
-    """Check if a story has been processed (optionally for a specific platform)"""
+    """
+    Return True if the story exists in processed_stories.json.
+    If platform is provided ("instagram" or "youtube"), we still return True as long as the story exists.
+    (i.e., mere presence = processed; platform flags are ignored for the 'processed' decision)
+    """
     processed_data = load_processed_stories()
-    
+
     for story in processed_data["stories"]:
-        if (story.get("id") == story_id or 
-            story.get("permalink") == permalink or 
+        if (story.get("id") == story_id or
+            story.get("permalink") == permalink or
             story.get("url") == url):
-            
-            if platform is None:
-                # If no platform specified, check if processed for any platform
-                platforms = story.get("platforms", {})
-                return any(platforms.values())
-            else:
-                # Check specific platform
-                platforms = story.get("platforms", {})
-                return platforms.get(platform, False)
+            return True  # presence alone means processed
+
     return False
 
 
-def add_processed_story(story_data, platforms=None):
-    """Add a story to the processed list with platform tracking"""
-    processed_data = load_processed_stories()
-    
-    if platforms is None:
-        platforms = []
-    
-    # Create a clean record of the processed story
-    story_record = {
-        "id": story_data.get("id"),
-        "permalink": story_data.get("permalink"),
-        "url": story_data.get("url"),
-        "title": story_data.get("title", "")[:100],
-        "author": story_data.get("author"),
-        "processed_date": datetime.now().isoformat(),
-        "num_comments": story_data.get("num_comments", 0),
-        "platforms": {
-            "youtube": "youtube" in platforms,
-            "instagram": "instagram" in platforms
+def upsert_processed_story(story_data, set_platform=None):
+    """
+    Upsert a story into processed_stories.json.
+    - If set_platform == "youtube" or "instagram": set only that platform True.
+    - If set_platform == "all": set both True.
+    - If None: just ensure the story exists (both False unless already present).
+    Matching is by id OR permalink OR url.
+    """
+    processed = load_processed_stories()
+    sid = story_data.get("id")
+    permalink = story_data.get("permalink")
+    url = story_data.get("url")
+
+    # Find existing record
+    idx = None
+    for i, s in enumerate(processed["stories"]):
+        if (sid and s.get("id") == sid) or \
+           (permalink and s.get("permalink") == permalink) or \
+           (url and s.get("url") == url):
+            idx = i
+            break
+
+    # Determine desired platform flags
+    def initial_platforms():
+        return {"youtube": False, "instagram": False}
+
+    if idx is None:
+        rec = {
+            "id": sid,
+            "permalink": permalink,
+            "url": url,
+            "title": story_data.get("title", "")[:100],
+            "author": story_data.get("author"),
+            "processed_date": datetime.now().isoformat(),
+            "num_comments": story_data.get("num_comments", 0),
+            "platforms": initial_platforms()
         }
-    }
-    
-    processed_data["stories"].append(story_record)
-    save_processed_stories(processed_data)
+        processed["stories"].append(rec)
+        idx = len(processed["stories"]) - 1
+
+    # Update platform flags
+    platforms = processed["stories"][idx].get("platforms") or initial_platforms()
+    if set_platform == "all":
+        platforms["youtube"] = True
+        platforms["instagram"] = True
+    elif set_platform in ("youtube", "instagram"):
+        platforms[set_platform] = True
+
+    processed["stories"][idx]["platforms"] = platforms
+    save_processed_stories(processed)
+
+
 
 
 @app.route("/check_story", methods=["POST"])
@@ -208,16 +245,23 @@ def mark_story_processed():
         platform = data.get("platform", "all")  # "youtube", "instagram", or "all"
         video_parts = data.get("video_parts", [])  # Add video parts to the input
         base_dir = data.get("base_dir", ".")  # Add base directory to the input
+        gcs_filenames = data.get("gcs_filenames", [])  # list of "temp_instagram/....mp4"
+
         
         if not story_data or not story_data.get("id"):
             return jsonify({"error": "Story data with ID is required"}), 400
         
         story_id = story_data.get("id")
         
+        # Upsert the record and set platform flags accordingly
         if platform == "all":
-            # Mark as completely processed (both platforms done)
-            add_processed_story(story_data)
-            # Clean up files only when all platforms are done
+            upsert_processed_story(story_data, set_platform="all")
+        else:
+            upsert_processed_story(story_data, set_platform=platform)
+
+        # Clean up only when ALL platforms are done
+        if platform == "all":
+            # Local files
             if video_parts:
                 for video_filename in video_parts:
                     try:
@@ -227,16 +271,20 @@ def mark_story_processed():
                             print(f"Deleted local file: {video_path}")
                     except Exception as e:
                         print(f"Failed to delete local file {video_path}: {e}")
-                        # Continue with other files even if one fails
-            
-            message = f"Story {story_id} marked as fully processed"
 
-        else:
-            # Mark as processed for specific platform only
-            # You might want to implement platform-specific tracking here
-            # For now, we'll just log it
-            print(f"Story {story_id} completed for platform: {platform}")
-            message = f"Story {story_id} completed for {platform}"
+            # GCS temp objects
+            if gcs_filenames:
+                for fname in gcs_filenames:
+                    try:
+                        delete_from_gcs(fname)
+                    except Exception as e:
+                        print(f"Failed to delete GCS object {fname}: {e}")
+
+        message = (
+            f"Story {story_id} marked as fully processed"
+            if platform == "all"
+            else f"Story {story_id} completed for {platform}"
+        )
         
         return jsonify({
             "success": True,
@@ -294,76 +342,48 @@ def clear_processed_stories():
 
 # --- GOOGLE CLOUD STORAGE HELPER FUNCTIONS ---
 
+
+
 def upload_to_gcs_temp(local_file_path, story_id, part_number):
-    """Upload video to Google Cloud Storage temporarily and return public URL"""
+    """Upload video to Google Cloud Storage"""
     try:
-        # Initialize the client (assumes you have credentials set up)
-        client = storage.Client()
-        bucket_name = "reddit-audio-n8n"  # Replace with your bucket name
-        bucket = client.bucket(bucket_name)
-        
-        # Create a temporary filename
+        client = storage.Client.from_service_account_json(GCS_CREDENTIALS_PATH)
+        bucket = client.bucket(GCS_BUCKET_NAME)
         filename = f"temp_instagram/{story_id}_part_{part_number:03d}.mp4"
         blob = bucket.blob(filename)
         
-        # Upload the file
-        blob.upload_from_filename(local_file_path)
+        # Upload with timeout and retry settings
+        blob.upload_from_filename(
+            local_file_path,
+            timeout=300,  # 5 minute timeout
+            retry=storage.retry.DEFAULT_RETRY
+        )
+
+        blob.content_type = "video/mp4"
+        blob.patch()
         
-        # Make it publicly accessible (temporarily)
         blob.make_public()
         
+        print(f"Successfully uploaded {filename} to GCS")
         return blob.public_url, filename
         
     except Exception as e:
-        print(f"Failed to upload to GCS: {e}")
+        print(f"GCS Upload Failed: {str(e)}")
         return None, None
 
-def delete_from_gcs(bucket_name, filename):
-    """Delete temporary file from Google Cloud Storage"""
+
+def delete_from_gcs(filename):
+    """Delete file from Google Cloud Storage"""
     try:
-        client = storage.Client()
-        bucket = client.bucket(bucket_name)
+        client = storage.Client.from_service_account_json(GCS_CREDENTIALS_PATH)
+        bucket = client.bucket(GCS_BUCKET_NAME)
         blob = bucket.blob(filename)
         blob.delete()
-        print(f"Deleted {filename} from GCS")
+        print(f"Successfully deleted {filename} from GCS")
+        return True
     except Exception as e:
-        print(f"Failed to delete {filename} from GCS: {e}")
-
-def upload_to_gcs_temp(local_file_path, story_id, part_number):
-    """Upload video to Google Cloud Storage temporarily and return public URL"""
-    try:
-        # Initialize the client (assumes you have credentials set up)
-        client = storage.Client()
-        bucket_name = "reddit"  # Replace with your bucket name
-        bucket = client.bucket(bucket_name)
-        
-        # Create a temporary filename
-        filename = f"temp_instagram/{story_id}_part_{part_number:03d}.mp4"
-        blob = bucket.blob(filename)
-        
-        # Upload the file
-        blob.upload_from_filename(local_file_path)
-        
-        # Make it publicly accessible (temporarily)
-        blob.make_public()
-        
-        return blob.public_url, filename
-        
-    except Exception as e:
-        print(f"Failed to upload to GCS: {e}")
-        return None, None
-
-def delete_from_gcs(bucket_name, filename):
-    """Delete temporary file from Google Cloud Storage"""
-    try:
-        client = storage.Client()
-        bucket = client.bucket(bucket_name)
-        blob = bucket.blob(filename)
-        blob.delete()
-        print(f"Deleted {filename} from GCS")
-    except Exception as e:
-        print(f"Failed to delete {filename} from GCS: {e}")
-
+        print(f"GCS Deletion Failed: {str(e)}")
+        return False
 
 # ===============================================================================
 
@@ -823,7 +843,7 @@ def upload_youtube_batch():
 
                 # Upload thumbnail
                 thumbnail_path = generate_thumbnail(video_path)
-                if thumbnail_path:
+                if False and thumbnail_path:
                     try:
                         thumbnail_request = youtube.thumbnails().set(
                             videoId=video_id,
@@ -909,54 +929,50 @@ def generate_instagram_caption(story_title, part_number, total_parts):
 @app.route("/upload_instagram_batch", methods=["POST"])
 def upload_instagram_batch():
     """Upload all video parts to Instagram as Reels"""
+
+    gcs_to_delete = []  # collect successfully-used objects for later cleanup
+    
     try:
         data = request.json
         video_parts_raw = data.get("video_parts", [])
         story_title = data.get("story_title", "AITA Story")
         base_dir = data.get("base_dir", ".")
+        story_data = data.get("story_data", {})
         
         # Debug logging
         print(f"DEBUG: Instagram - Received video_parts type: {type(video_parts_raw)}")
         print(f"DEBUG: Instagram - Received video_parts content: {video_parts_raw}")
         
-        # Handle different input formats (same logic as YouTube)
+        # Handle different input formats
         if isinstance(video_parts_raw, str):
             try:
-                import json
                 video_parts = json.loads(video_parts_raw)
             except json.JSONDecodeError:
                 video_parts = [part.strip() for part in video_parts_raw.split(',') if part.strip()]
         elif isinstance(video_parts_raw, list):
             video_parts = video_parts_raw
         else:
-            return jsonify({"error": f"Invalid video_parts format"}), 400
+            return jsonify({"error": "Invalid video_parts format"}), 400
         
         # Filter for valid video filenames
-        import re
-        valid_video_parts = []
-        for part in video_parts:
-            if isinstance(part, str) and len(part) > 3:
-                if re.match(r'.*\.(mp4|mov)$', part, re.IGNORECASE):
-                    valid_video_parts.append(part)
+        valid_video_parts = [
+            part for part in video_parts 
+            if isinstance(part, str) and len(part) > 3 and part.lower().endswith(('.mp4', '.mov'))
+        ]
         
-        video_parts = valid_video_parts
-        print(f"DEBUG: Instagram - Final valid video parts: {video_parts}")
+        print(f"DEBUG: Instagram - Final valid video parts: {valid_video_parts}")
         
-        if not video_parts:
+        if not valid_video_parts:
             return jsonify({"error": "No valid video files found"}), 400
-        
-        # Check if Instagram credentials are configured
-        if not INSTAGRAM_ACCESS_TOKEN or INSTAGRAM_ACCESS_TOKEN == "your_instagram_access_token":
-            return jsonify({"error": "Instagram access token not configured"}), 500
             
-        if not INSTAGRAM_ACCOUNT_ID or INSTAGRAM_ACCOUNT_ID == "your_instagram_business_account_id":
-            return jsonify({"error": "Instagram account ID not configured"}), 500
+        if not INSTAGRAM_ACCESS_TOKEN or not INSTAGRAM_ACCOUNT_ID:
+            return jsonify({"error": "Instagram credentials not configured"}), 500
         
-        total_parts = len(video_parts)
+        total_parts = len(valid_video_parts)
         upload_results = []
-        story_id = data.get("story_data", {}).get("id", "unknown")
+        story_id = story_data.get("id", "unknown")
         
-        for i, video_filename in enumerate(video_parts, 1):
+        for i, video_filename in enumerate(valid_video_parts, 1):
             try:
                 video_path = os.path.join(base_dir, video_filename)
                 
@@ -984,81 +1000,185 @@ def upload_instagram_batch():
                 
                 # Step 2: Create Instagram media
                 caption = generate_instagram_caption(story_title, i, total_parts)
-                
-                # Create media container
                 create_media_url = f"{INSTAGRAM_API_BASE}/{INSTAGRAM_ACCOUNT_ID}/media"
-                media_payload = {
-                    "media_type": "REELS",
-                    "video_url": public_url,
-                    "caption": caption,
-                    "access_token": INSTAGRAM_ACCESS_TOKEN
-                }
                 
-                print(f"Creating Instagram media container for part {i}...")
-                media_response = requests.post(create_media_url, data=media_payload)
-                print(f"Media creation response: {media_response.status_code} - {media_response.text}")
-                
-                if media_response.status_code != 200:
-                    # Clean up GCS file
-                    delete_from_gcs(GCS_BUCKET_NAME, gcs_filename)  # Use your actual bucket name
-                    
+                try:
+                    media_response = requests.post(
+                        create_media_url,
+                        data={
+                            "media_type": "REELS",
+                            "video_url": public_url,
+                            "caption": caption,
+                            "access_token": INSTAGRAM_ACCESS_TOKEN
+                        },
+                        timeout=60
+                    )
+
+                    # Debug output for failed requests
+                    if not media_response.ok:
+                        print("IG create_media HTTPError:",
+                              media_response.status_code, media_response.text)
+                        upload_results.append({
+                            "part": i,
+                            "filename": video_filename,
+                            "success": False,
+                            "error": f"create_media {media_response.status_code}: {media_response.text}"
+                        })
+                        continue
+
+                    print("IG create_media:", media_response.status_code, media_response.text)
+                    media_id = media_response.json().get("id")
+
+                    # --- WAIT UNTIL IG PROCESSES THE VIDEO ---
+                    status_url = f"{INSTAGRAM_API_BASE}/{media_id}"
+                    max_attempts = 120   # 120 * 5s = 10 minutes
+                    finished = False
+
+                    for attempt in range(1, max_attempts + 1):
+                        try:
+                            s = requests.get(
+                                status_url,
+                                params={"fields": "status_code,status", "access_token": INSTAGRAM_ACCESS_TOKEN},  # removed 'message'
+                                timeout=30,
+                            ).json()
+                        except Exception as e:
+                            print(f"IG status poll error (attempt {attempt}): {e}")
+                            time.sleep(5)
+                            continue
+
+                        # If IG returned an error object instead of status_code
+                        if "error" in (s or {}):
+                            err = s["error"]
+                            print(f"IG status poll returned error (attempt {attempt}): {err}")
+                            if gcs_filename:
+                                delete_from_gcs(gcs_filename)
+                            upload_results.append({
+                                "part": i,
+                                "filename": video_filename,
+                                "success": False,
+                                "error": f"IG poll error: code {err.get('code')} subcode {err.get('error_subcode')} msg {err.get('message')}"
+                            })
+                            finished = False
+                            break
+
+                        sc = (s or {}).get("status_code", "")
+                        if sc == "FINISHED":
+                            print(f"IG status FINISHED (attempt {attempt})")
+                            finished = True
+                            break
+                        if sc in ("ERROR", "EXPIRED"):
+                            if gcs_filename:
+                                delete_from_gcs(gcs_filename)
+                            upload_results.append({
+                                "part": i,
+                                "filename": video_filename,
+                                "success": False,
+                                "error": f"IG container {sc}"
+                            })
+                            print(f"IG status {sc}: {s}")
+                            finished = False
+                            break
+
+                        if attempt % 6 == 0:
+                            print(f"IG status waiting (attempt {attempt}): {s}")
+                        time.sleep(5)
+
+                    if not finished:
+                        if gcs_filename:
+                            delete_from_gcs(gcs_filename)
+                        upload_results.append({
+                            "part": i,
+                            "filename": video_filename,
+                            "success": False,
+                            "error": "IG processing timeout before publish"
+                        })
+                        continue
+
+                except requests.exceptions.RequestException as e:
+                    delete_from_gcs(gcs_filename)
                     upload_results.append({
                         "part": i,
                         "filename": video_filename,
                         "success": False,
-                        "error": f"Failed to create Instagram media: {media_response.text}"
+                        "error": f"Instagram API connection failed: {str(e)}"
                     })
                     continue
                 
                 media_id = media_response.json().get("id")
-                
-                # Step 3: Wait a moment for media processing
-                import time
-                time.sleep(2)
-                
-                # Step 4: Publish the media
-                publish_url = f"{INSTAGRAM_API_BASE}/{INSTAGRAM_ACCOUNT_ID}/media_publish"
-                publish_payload = {
-                    "creation_id": media_id,
-                    "access_token": INSTAGRAM_ACCESS_TOKEN
-                }
-                
-                print(f"Publishing Instagram reel for part {i}...")
-                publish_response = requests.post(publish_url, data=publish_payload)
-                print(f"Publish response: {publish_response.status_code} - {publish_response.text}")
-                
-                if publish_response.status_code == 200:
-                    published_media_id = publish_response.json().get("id")
-                    instagram_url = f"https://www.instagram.com/p/{published_media_id}/"
+
+
+                status_url = f"{INSTAGRAM_API_BASE}/{media_id}"
+                for attempt in range(20):  # ~20 * 3s = 60s max
+                    s = requests.get(
+                        status_url,
+                        params={"fields": "status_code,status,message", "access_token": INSTAGRAM_ACCESS_TOKEN},
+                        timeout=15,
+                    ).json()
+                    sc = (s or {}).get("status_code", "")
+                    if sc == "FINISHED":
+                        break
+                    if sc in ("ERROR", "EXPIRED"):
+                        delete_from_gcs(gcs_filename)
+                        upload_results.append({
+                            "part": i, "filename": video_filename, "success": False,
+                            "error": f"Container not ready: {s}"
+                        })
+                        continue  # next part
+                    time.sleep(3)
                     
-                    upload_results.append({
-                        "part": i,
-                        "filename": video_filename,
-                        "success": True,
-                        "media_id": published_media_id,
-                        "instagram_url": instagram_url,
-                        "caption": caption
-                    })
-                    
-                    print(f"Successfully posted Instagram reel part {i}: {instagram_url}")
-                    
-                    # Delete local file after successful upload
-                    try:
-                        os.remove(video_path)
-                        print(f"Deleted local file: {video_path}")
-                    except Exception as e:
-                        print(f"Failed to delete local file {video_path}: {e}")
-                        
-                else:
+
+                                
+                if not media_id:
+                    delete_from_gcs(gcs_filename)
                     upload_results.append({
                         "part": i,
                         "filename": video_filename,
                         "success": False,
-                        "error": f"Failed to publish Instagram media: {publish_response.text}"
+                        "error": "No media ID in Instagram response"
                     })
+                    continue
                 
-                # Clean up GCS file
-                delete_from_gcs(GCS_BUCKET_NAME, gcs_filename)
+                # Step 3: Publish the media
+                try:
+                    publish_url = f"{INSTAGRAM_API_BASE}/{INSTAGRAM_ACCOUNT_ID}/media_publish"
+                    publish_response = requests.post(
+                        publish_url,
+                        data={
+                            "creation_id": media_id,
+                            "access_token": INSTAGRAM_ACCESS_TOKEN
+                        },
+                        timeout=60
+                    )
+                    publish_response.raise_for_status()
+                    print("IG publish:", publish_response.status_code, publish_response.text)
+                    
+                    
+                except requests.exceptions.RequestException as e:
+                    delete_from_gcs(gcs_filename)
+                    upload_results.append({
+                        "part": i,
+                        "filename": video_filename,
+                        "success": False,
+                        "error": f"Failed to publish to Instagram: {str(e)}"
+                    })
+                    continue
+                
+                # Success case
+                result_data = {
+                    "part": i,
+                    "filename": video_filename,
+                    "success": True,
+                    "media_id": media_id,
+                    "caption": caption
+                }
+                
+                try:
+                    result_data["instagram_url"] = f"https://www.instagram.com/p/{publish_response.json().get('id')}/"
+                except:
+                    pass
+
+                gcs_to_delete.append(gcs_filename)
+                upload_results.append(result_data)
                 
             except Exception as e:
                 upload_results.append({
@@ -1067,24 +1187,130 @@ def upload_instagram_batch():
                     "success": False,
                     "error": str(e)
                 })
-                print(f"Failed to upload Instagram part {i}: {str(e)}")
+                print(f"Unexpected error uploading part {i}: {str(e)}")
         
         successful_uploads = len([r for r in upload_results if r["success"]])
+
         
+        status_code = 200
+        if successful_uploads == 0:
+            status_code = 400          # total failure -> make n8n show error
+        elif successful_uploads < total_parts:
+            status_code = 207          # partial success
+
         return jsonify({
             "total_parts": total_parts,
-            "successful_uploads": successful_uploads,  
+            "successful_uploads": successful_uploads,
             "failed_uploads": total_parts - successful_uploads,
             "results": upload_results,
+            "gcs_filenames": gcs_to_delete,          # <--- add this
+            "video_parts": valid_video_parts,
             "message": f"Uploaded {successful_uploads}/{total_parts} parts to Instagram"
-        })
+        }), status_code
         
     except Exception as e:
         return jsonify({"error": f"Instagram batch upload failed: {str(e)}"}), 500
 
+# MORE TESTS
 
+def get_instagram_account_id():
+    import requests
+    response = requests.get(
+        f"https://graph.facebook.com/v23.0/me/accounts",
+        params={"access_token": INSTAGRAM_ACCESS_TOKEN}
+    )
+    print(response.json())  # Look for the connected Instagram account
+
+
+
+
+def ig_health_check():
+    # With a PAGE token, /me is the Page
+    page = requests.get(
+        f"{INSTAGRAM_API_BASE}/me",
+        params={"fields": "id,name,instagram_business_account,connected_instagram_account",
+                "access_token": INSTAGRAM_ACCESS_TOKEN},
+        timeout=15
+    ).json()
+
+    # Figure out IG id from either field
+    ig_obj = (page.get("instagram_business_account")
+              or page.get("connected_instagram_account")
+              or {})
+    ig_id = ig_obj.get("id")
+
+    ig_user = None
+    if ig_id:
+        ig_user = requests.get(
+            f"{INSTAGRAM_API_BASE}/{ig_id}",
+            params={"fields": "id,username", "access_token": INSTAGRAM_ACCESS_TOKEN},
+            timeout=15
+        ).json()
+
+    return {
+        "page": page,               # should show your Page id 7140… and the ig link
+        "ig_user": ig_user,         # should show id 1784… and username
+        "using_token_type": "page"  # just to make it obvious in responses
+    }
+
+@app.route("/ig_health", methods=["GET"])
+def ig_health():
+    try:
+        return jsonify(ig_health_check())
+    except Exception as e:
+        return jsonify({"error": f"ig_health failed: {str(e)}"}), 500
+
+
+    
+
+
+def verify_instagram_connection():
+    import requests
+    # First get Facebook pages
+    pages = requests.get(
+        f"https://graph.facebook.com/v23.0/me/accounts",
+        params={"access_token": INSTAGRAM_ACCESS_TOKEN}
+    ).json()
+    print("Facebook Pages:", pages)
+
+    # Then check Instagram connection
+    for page in pages.get('data', []):
+        instagram_account = requests.get(
+            f"https://graph.facebook.com/v23.0/{page['id']}",
+            params={"fields": "instagram_business_account", "access_token": INSTAGRAM_ACCESS_TOKEN}
+        ).json()
+        print("Instagram Link:", instagram_account)
+        
+
+def debug_connections():
+    import requests
+    # 1. Check user pages
+    user_pages = requests.get(
+        "https://graph.facebook.com/v23.0/me/accounts",
+        params={"access_token": INSTAGRAM_ACCESS_TOKEN}
+    ).json()
+    print("User Pages:", user_pages)
+
+    # 2. Direct Instagram connection check
+    instagram_account = requests.get(
+        "https://graph.facebook.com/v23.0/me",
+        params={"fields": "connected_instagram_account", "access_token": INSTAGRAM_ACCESS_TOKEN}
+    ).json()
+    print("Instagram Connection:", instagram_account)
+
+    # 3. Business assets verification
+    business_users = requests.get(
+        "https://graph.facebook.com/v23.0/me/business_users",
+        params={"access_token": INSTAGRAM_ACCESS_TOKEN}
+    ).json()
+    print("Business Users:", business_users)
+
+@app.route("/routes")
+def routes():
+    return {"routes": [str(r) for r in app.url_map.iter_rules()]}
 
 
 
 if __name__ == "__main__":
-    app.run(port=5001)
+    app.run(port=5001, debug = True)
+    
