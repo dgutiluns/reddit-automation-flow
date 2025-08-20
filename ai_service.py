@@ -20,6 +20,7 @@ from PIL import Image
 import tempfile
 import requests
 import time
+import mimetypes
 
 app = Flask(__name__)
 base_dir = os.path.dirname(__file__)
@@ -45,6 +46,38 @@ INSTAGRAM_API_BASE = "https://graph.facebook.com/v23.0"
 # GCS CREDENTIALS:
 GCS_CREDENTIALS_PATH = "/Users/diegogutierrez/Desktop/reddit-video-service/fast-tensor-467015-t9-2e032de3f47f.json"
 GCS_BUCKET_NAME = "reddit-audio-n8n"
+
+# TIKTOK CREDENTIALS:
+TIKTOK_CLIENT_KEY = "your_client_key_here"  # Replace with your actual client key
+TIKTOK_CLIENT_SECRET = "your_client_secret_here"  # Replace with your actual client secret
+TIKTOK_ACCESS_TOKEN = "your_access_token_here"  # From tiktok_tokens.txt (starts with 'act.')
+TIKTOK_OPEN_ID = "your_open_id_here"  # From tiktok_tokens.txt
+TIKTOK_API_BASE = "https://open.tiktokapis.com"
+
+# DEEPGRAM CREDENTIALS:
+DEEPGRAM_API_KEY = "597f05b9700111d51840862064280f8582369689"  # Replace with your actual key if different
+DEEPGRAM_VOICE = "aura-2-apollo-en"  # Male voice as requested
+DEEPGRAM_URL = "https://api.deepgram.com/v1/speak"
+
+ELEVENLABS_API_KEY = "sk_f00ce9024636631dcb714280b1645f76db1099b11938c054"  # Replace with your actual key
+ELEVENLABS_VOICE_ID = "pNInz6obpgDQGcFmaJgB"  # Adam - male voice, you can change this
+ELEVENLABS_URL = "https://api.elevenlabs.io/v1/text-to-speech"
+
+# ====================================================================================================
+
+# GOOGLE AUDIO CREDENTIALS AND GLOBAL VARIABLES
+
+USE_GOOGLE_TTS = True  # flip to False to fall back to gTTS
+
+# If you want this to be “permanent” without env vars, point to the JSON here:
+GOOGLE_TTS_CREDENTIALS_PATH = "/Users/diegogutierrez/Desktop/reddit-video-service/google-speech-credentials.json"
+
+# Voice preferences (pick any available voice you like)
+GOOGLE_TTS_LANGUAGE = "en-US"
+GOOGLE_TTS_VOICE_NAME = "en-US-Neural2-A"   # e.g., en-US-Standard-C, en-US-Neural2-F, etc.
+GOOGLE_TTS_SPEAKING_RATE = 1.0              # 0.25–4.0
+GOOGLE_TTS_PITCH = 0.0                      # -20.0–20.0 semitonesUSE_GOOGLE_TTS = True  # flip to False to fall back to gTTS
+
 
 # TESTING SCRIPTS
 
@@ -411,6 +444,39 @@ def format_timestamp(seconds: float) -> str:
     return f"{h:02}:{m:02}:{s:02},{ms:03}"
 
 
+def synthesize_with_google(full_text: str) -> str:
+    """
+    Synthesize speech with Google Cloud TTS and return a temp MP3 path.
+    """
+    # Load credentials from a file (no env var required)
+    client = gc_tts.TextToSpeechClient.from_service_account_file(GOOGLE_TTS_CREDENTIALS_PATH)
+
+    input_text = gc_tts.SynthesisInput(text=full_text)
+
+    voice = gc_tts.VoiceSelectionParams(
+        language_code=GOOGLE_TTS_LANGUAGE,
+        name=GOOGLE_TTS_VOICE_NAME,  # leave None to let Google pick one by language
+        ssml_gender=gc_tts.SsmlVoiceGender.NEUTRAL
+    )
+
+    audio_config = gc_tts.AudioConfig(
+        audio_encoding=gc_tts.AudioEncoding.MP3,
+        speaking_rate=GOOGLE_TTS_SPEAKING_RATE,
+        pitch=GOOGLE_TTS_PITCH
+    )
+
+    response = client.synthesize_speech(
+        input=input_text,
+        voice=voice,
+        audio_config=audio_config
+    )
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+    with open(tmp.name, "wb") as f:
+        f.write(response.audio_content)
+    return tmp.name
+
+
 # --- 1. TEXT-TO-SPEECH ---
 
 @app.route("/synthesize", methods=["POST"])
@@ -421,22 +487,184 @@ def synthesize():
     if not text:
         return jsonify({"error": "Missing 'text'"}), 400
 
-    # --- REMOVE the OG POST link line ---
+    # Remove OG POST header line if present
     if text.startswith("OG POST:"):
         text = "\n".join(text.splitlines()[1:])
 
-    # Prepend title to the text if title is provided
-    if title:
-        full_text = f"{title}. {text}"
-    else:
-        full_text = text
-    
-    tts = gTTS(full_text)
-    
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-    tts.save(temp_file.name)
+    full_text = f"{title}. {text}" if title else text
 
-    return send_file(temp_file.name, mimetype="audio/mpeg", as_attachment=True, download_name="tts.mp3")
+    try:
+        if USE_GOOGLE_TTS:
+            mp3_path = synthesize_with_google(full_text)
+        else:
+            # Fallback to gTTS (what you had)
+            tts = gTTS(full_text)
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+            tts.save(tmp.name)
+            mp3_path = tmp.name
+
+        return send_file(mp3_path, mimetype="audio/mpeg", as_attachment=True, download_name="tts.mp3")
+
+    except Exception as e:
+        # As a backup, try gTTS automatically if Google fails
+        try:
+            tts = gTTS(full_text)
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+            tts.save(tmp.name)
+            return send_file(tmp.name, mimetype="audio/mpeg", as_attachment=True, download_name="tts.mp3")
+        except Exception as e2:
+            return jsonify({"error": "TTS failed", "google_error": str(e), "fallback_error": str(e2)}), 500
+
+# DEEP GRAM TEXT TO SPEECH:
+@app.route("/synthesize_deepgram", methods=["POST"])
+def synthesize_deepgram():
+    """
+    Convert text to speech using Deepgram API (male voice)
+    """
+    data = request.json
+    text = data.get("text")
+    title = data.get("title")
+    
+    if not text:
+        return jsonify({"error": "Missing 'text'"}), 400
+
+    # Remove OG POST header line if present
+    if text.startswith("OG POST:"):
+        text = "\n".join(text.splitlines()[1:])
+
+    full_text = f"{title}. {text}" if title else text
+
+    try:
+        # Prepare Deepgram API request
+        headers = {
+            "Authorization": f"Token {DEEPGRAM_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "text": full_text
+        }
+        
+        # Make request to Deepgram
+        response = requests.post(
+            f"{DEEPGRAM_URL}?model={DEEPGRAM_VOICE}",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        if response.status_code != 200:
+            return jsonify({
+                "error": "Deepgram TTS failed", 
+                "status_code": response.status_code,
+                "details": response.text
+            }), 500
+        
+        # Save the audio to temporary file
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        with open(tmp.name, "wb") as f:
+            f.write(response.content)
+        
+        return send_file(tmp.name, mimetype="audio/mpeg", as_attachment=True, download_name="deepgram_tts.mp3")
+
+    except Exception as e:
+        # Fallback to Google TTS if Deepgram fails
+        try:
+            print(f"Deepgram failed, falling back to Google TTS: {str(e)}")
+            if USE_GOOGLE_TTS:
+                mp3_path = synthesize_with_google(full_text)
+            else:
+                tts = gTTS(full_text)
+                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+                tts.save(tmp.name)
+                mp3_path = tmp.name
+            
+            return send_file(mp3_path, mimetype="audio/mpeg", as_attachment=True, download_name="fallback_tts.mp3")
+        except Exception as e2:
+            return jsonify({
+                "error": "All TTS methods failed", 
+                "deepgram_error": str(e),
+                "fallback_error": str(e2)
+            }), 500
+
+
+# ELEVENLABS TTS
+@app.route("/synthesize_elevenlabs", methods=["POST"])
+def synthesize_elevenlabs():
+    """
+    Convert text to speech using ElevenLabs API (male voice)
+    """
+    data = request.json
+    text = data.get("text")
+    title = data.get("title")
+    
+    if not text:
+        return jsonify({"error": "Missing 'text'"}), 400
+
+    # Remove OG POST header line if present
+    if text.startswith("OG POST:"):
+        text = "\n".join(text.splitlines()[1:])
+
+    full_text = f"{title}. {text}" if title else text
+
+    try:
+        # Prepare ElevenLabs API request
+        headers = {
+            "Accept": "audio/mpeg",
+            "Content-Type": "application/json",
+            "xi-api-key": ELEVENLABS_API_KEY
+        }
+        
+        payload = {
+            "text": full_text,
+            "model_id": "eleven_monolingual_v1",
+            "voice_settings": {
+                "stability": 0.5,
+                "similarity_boost": 0.5
+            }
+        }
+        
+        # Make request to ElevenLabs
+        response = requests.post(
+            f"{ELEVENLABS_URL}/{ELEVENLABS_VOICE_ID}",
+            headers=headers,
+            json=payload,
+            timeout=60  # Longer timeout for longer texts
+        )
+        
+        if response.status_code != 200:
+            return jsonify({
+                "error": "ElevenLabs TTS failed", 
+                "status_code": response.status_code,
+                "details": response.text
+            }), 500
+        
+        # Save the audio to temporary file
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        with open(tmp.name, "wb") as f:
+            f.write(response.content)
+        
+        return send_file(tmp.name, mimetype="audio/mpeg", as_attachment=True, download_name="elevenlabs_tts.mp3")
+
+    except Exception as e:
+        # Fallback to Google TTS if ElevenLabs fails
+        try:
+            print(f"ElevenLabs failed, falling back to Google TTS: {str(e)}")
+            if USE_GOOGLE_TTS:
+                mp3_path = synthesize_with_google(full_text)
+            else:
+                tts = gTTS(full_text)
+                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+                tts.save(tmp.name)
+                mp3_path = tmp.name
+            
+            return send_file(mp3_path, mimetype="audio/mpeg", as_attachment=True, download_name="fallback_tts.mp3")
+        except Exception as e2:
+            return jsonify({
+                "error": "All TTS methods failed", 
+                "elevenlabs_error": str(e),
+                "fallback_error": str(e2)
+            }), 500
 
 # --- 2. GET AUDIO DURATION ---
 
@@ -446,13 +674,29 @@ def get_audio_duration():
     if not file:
         return jsonify({"error": "Missing audio file"}), 400
 
-    temp_path = os.path.join(tempfile.gettempdir(), file.filename)
+    #temp_path = os.path.join(tempfile.gettempdir(), file.filename)
+    #file.save(temp_path)
+
+    #audio = AudioSegment.from_file(temp_path)
+    #duration_sec = len(audio) / 1000.0
+    #return jsonify({"duration": duration_sec})
+
+
+    unique_id = str(uuid.uuid4())[:8]
+    temp_path = os.path.join(tempfile.gettempdir(), f"audio_{unique_id}_{file.filename}")
     file.save(temp_path)
 
-    audio = AudioSegment.from_file(temp_path)
-    duration_sec = len(audio) / 1000.0
-    return jsonify({"duration": duration_sec})
-
+    try:
+        audio = AudioSegment.from_file(temp_path)
+        duration_sec = len(audio) / 1000.0
+        return jsonify({"duration": duration_sec})
+    finally:
+        # Clean up
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except:
+            pass
 
 # --- 2.5. EXTEND VIDEO ---
 @app.route("/extend_video", methods=["POST"])
@@ -512,7 +756,10 @@ def caption_video():
 
     input_path = os.path.join(base_dir, input_video)
     output_path = os.path.join(base_dir, output_name)
-    audio_path = os.path.join(base_dir, "input_audio.mp3")
+    #audio_path = os.path.join(base_dir, "input_audio.mp3")
+    unique_id = str(uuid.uuid4())[:8]
+    audio_path = os.path.join(base_dir, f"input_audio_{unique_id}.mp3")
+
 
     try:
         print(f"Downloading audio from {audio_url}...")
@@ -587,7 +834,10 @@ def combine_audio_video():
     if not audio_url:
         return jsonify({"error": "Missing 'audio_url'"}), 400
 
-    audio_file = os.path.join(base_dir, "input_audio.mp3")
+    #audio_file = os.path.join(base_dir, "input_audio.mp3")
+    unique_id = str(uuid.uuid4())[:8]
+    audio_file = os.path.join(base_dir, f"input_audio_{unique_id}.mp3")
+    
     video_file = os.path.join(base_dir, input_video)
     output_file = os.path.join(base_dir, output_name)
 
@@ -596,8 +846,10 @@ def combine_audio_video():
 
         subprocess.run([
             "ffmpeg", "-y",
-            "-i", video_file,
-            "-i", audio_file,
+            "-i", video_file,           # input 0 (video)
+            "-i", audio_file,           # input 1 (narration)
+            "-map", "0:v:0",            # take ONLY video from input 0
+            "-map", "1:a:0",            # take ONLY audio from input 1
             "-c:v", "copy",
             "-c:a", "aac",
             "-shortest",
@@ -1304,6 +1556,407 @@ def debug_connections():
         params={"access_token": INSTAGRAM_ACCESS_TOKEN}
     ).json()
     print("Business Users:", business_users)
+
+
+# ================= TIK TOK UPLOADING LOGIC (Helpers and endpoint) ==================
+def get_tiktok_user_info():
+    """Get TikTok user information using Content Posting API"""
+    try:
+        response = requests.get(
+            f"{TIKTOK_API_BASE}/v2/user/info/",
+            headers={
+                'Authorization': f'Bearer {TIKTOK_ACCESS_TOKEN}',
+                'Content-Type': 'application/json'
+            },
+            params={'fields': 'open_id,union_id,avatar_url,display_name'},
+            timeout=30
+        )
+        return response.json()
+    except Exception as e:
+        print(f"Failed to get TikTok user info: {e}")
+        return None
+
+def generate_tiktok_description(story_title, part_number, total_parts):
+    """Generate TikTok-optimized description"""
+    
+    # Clean story title
+    clean_title = story_title.replace("AITA", "").replace("aita", "").strip()
+    if clean_title.startswith("for "):
+        clean_title = clean_title[4:]
+    
+    # Create description (TikTok allows up to 4000 characters)
+    if total_parts > 1:
+        description = f"AITA Story Part {part_number}/{total_parts} 🤔\n\n"
+    else:
+        description = "AITA Story 🤔\n\n"
+    
+    # Add story snippet
+    if len(clean_title) > 150:
+        story_snippet = clean_title[:147] + "..."
+    else:
+        story_snippet = clean_title
+    
+    description += story_snippet + "\n\n"
+    
+    # Add call to action
+    if total_parts > 1:
+        description += f"Watch all {total_parts} parts for the complete story! "
+    
+    description += "What do you think? 💭\n\n"
+    
+    # Add hashtags
+    hashtags = [
+        "#AITA", "#AmITheAsshole", "#RedditStories", "#Reddit", 
+        "#Drama", "#Storytime", "#TrueStory", "#Viral",
+        "#Relationships", "#Family", "#Advice", "#MoralDilemma"
+    ]
+    
+    # Add contextual hashtags
+    title_lower = clean_title.lower()
+    if any(word in title_lower for word in ["wedding", "marriage", "married"]):
+        hashtags.extend(["#Wedding", "#Marriage"])
+    if any(word in title_lower for word in ["family", "mom", "dad", "parent"]):
+        hashtags.extend(["#Family", "#Parents"])
+    if any(word in title_lower for word in ["work", "job", "boss"]):
+        hashtags.extend(["#Work", "#Job"])
+    if any(word in title_lower for word in ["friend", "friendship"]):
+        hashtags.extend(["#Friends", "#Friendship"])
+    
+    description += " ".join(hashtags)
+    
+    # TikTok description limit
+    if len(description) > 4000:
+        description = description[:3997] + "..."
+    
+    return description
+
+def upload_video_to_tiktok_inbox(video_path, description):
+    """
+    Upload video to TikTok using the new Content Posting API (Inbox method)
+    This uploads to user's inbox for review before posting
+    """
+    try:
+        # Get video file size
+        video_size = os.path.getsize(video_path)
+        
+        # Step 1: Initialize video upload
+        print("Initializing TikTok video upload...")
+        init_url = f"{TIKTOK_API_BASE}/v2/post/publish/inbox/video/init/"
+        
+        init_payload = {
+            "source_info": {
+                "source": "FILE_UPLOAD",
+                "video_size": video_size,
+                "chunk_size": video_size,  # Single chunk upload
+                "total_chunk_count": 1
+            }
+        }
+        
+        init_headers = {
+            'Authorization': f'Bearer {TIKTOK_ACCESS_TOKEN}',
+            'Content-Type': 'application/json'
+        }
+        
+        init_response = requests.post(init_url, json=init_payload, headers=init_headers, timeout=60)
+        
+        if not init_response.ok:
+            print(f"Init response: {init_response.status_code} - {init_response.text}")
+            return False, f"Init failed: {init_response.text}"
+        
+        init_data = init_response.json()
+        
+        if init_data.get('error', {}).get('code') != 'ok':
+            return False, f"Init error: {init_data.get('error', {})}"
+        
+        upload_url = init_data['data']['upload_url']
+        publish_id = init_data['data']['publish_id']
+        
+        print(f"Got upload URL and publish ID: {publish_id}")
+        
+        # Step 2: Upload video file
+        print("Uploading video file to TikTok...")
+        
+        with open(video_path, 'rb') as video_file:
+            video_content = video_file.read()
+        
+        upload_headers = {
+            'Content-Range': f'bytes 0-{video_size-1}/{video_size}',
+            'Content-Type': 'video/mp4'
+        }
+        
+        upload_response = requests.put(
+            upload_url,
+            data=video_content,
+            headers=upload_headers,
+            timeout=300  # 5 minute timeout for video upload
+        )
+        
+        if not upload_response.ok:
+            print(f"Upload response: {upload_response.status_code} - {upload_response.text}")
+            return False, f"Upload failed: {upload_response.text}"
+        
+        print("Video uploaded successfully!")
+        
+        # Step 3: Check upload status (optional but recommended)
+        status_check_count = 0
+        max_status_checks = 10
+        
+        while status_check_count < max_status_checks:
+            print(f"Checking upload status... (attempt {status_check_count + 1})")
+            
+            status_url = f"{TIKTOK_API_BASE}/v2/post/publish/status/fetch/"
+            status_payload = {"publish_id": publish_id}
+            
+            status_response = requests.post(
+                status_url,
+                json=status_payload,
+                headers=init_headers,
+                timeout=30
+            )
+            
+            if status_response.ok:
+                status_data = status_response.json()
+                print(f"Status response: {status_data}")
+                
+                if status_data.get('error', {}).get('code') == 'ok':
+                    status_info = status_data.get('data', {})
+                    if status_info.get('status') == 'PROCESSING_DOWNLOAD':
+                        print("Video is being processed...")
+                        time.sleep(5)
+                        status_check_count += 1
+                        continue
+                    elif status_info.get('status') in ['SEND_TO_USER_INBOX', 'SUCCESS']:
+                        print("Video successfully sent to user inbox!")
+                        break
+                    else:
+                        print(f"Unknown status: {status_info.get('status')}")
+                        break
+                else:
+                    print(f"Status check error: {status_data.get('error', {})}")
+                    break
+            else:
+                print(f"Status check failed: {status_response.text}")
+                break
+        
+        return True, {
+            'publish_id': publish_id,
+            'description': description,
+            'status': 'sent_to_inbox',
+            'message': 'Video sent to user inbox for review and posting'
+        }
+        
+    except Exception as e:
+        return False, f"TikTok upload error: {str(e)}"
+
+def upload_video_to_tiktok_from_url(video_url, description):
+    """
+    Upload video to TikTok using URL (requires verified domain)
+    """
+    try:
+        print("Initializing TikTok video upload from URL...")
+        init_url = f"{TIKTOK_API_BASE}/v2/post/publish/inbox/video/init/"
+        
+        init_payload = {
+            "source_info": {
+                "source": "PULL_FROM_URL",
+                "video_url": video_url
+            }
+        }
+        
+        init_headers = {
+            'Authorization': f'Bearer {TIKTOK_ACCESS_TOKEN}',
+            'Content-Type': 'application/json'
+        }
+        
+        init_response = requests.post(init_url, json=init_payload, headers=init_headers, timeout=60)
+        
+        if not init_response.ok:
+            return False, f"Init failed: {init_response.text}"
+        
+        init_data = init_response.json()
+        
+        if init_data.get('error', {}).get('code') != 'ok':
+            return False, f"Init error: {init_data.get('error', {})}"
+        
+        publish_id = init_data['data']['publish_id']
+        
+        return True, {
+            'publish_id': publish_id,
+            'description': description,
+            'status': 'sent_to_inbox',
+            'message': 'Video sent to user inbox for review and posting'
+        }
+        
+    except Exception as e:
+        return False, f"TikTok URL upload error: {str(e)}"
+
+@app.route("/upload_tiktok_batch", methods=["POST"])
+def upload_tiktok_batch():
+    """Upload all video parts to TikTok using Content Posting API"""
+    
+    try:
+        data = request.json
+        video_parts_raw = data.get("video_parts", [])
+        story_title = data.get("story_title", "AITA Story")
+        base_dir = data.get("base_dir", ".")
+        story_data = data.get("story_data", {})
+        use_gcs_url = data.get("use_gcs_url", False)  # Option to use GCS URLs instead
+        
+        print(f"DEBUG: TikTok - Received video_parts: {video_parts_raw}")
+        
+        # Handle different input formats
+        if isinstance(video_parts_raw, str):
+            try:
+                video_parts = json.loads(video_parts_raw)
+            except json.JSONDecodeError:
+                video_parts = [part.strip() for part in video_parts_raw.split(',') if part.strip()]
+        elif isinstance(video_parts_raw, list):
+            video_parts = video_parts_raw
+        else:
+            return jsonify({"error": "Invalid video_parts format"}), 400
+        
+        # Filter for valid video filenames
+        valid_video_parts = [
+            part for part in video_parts 
+            if isinstance(part, str) and len(part) > 3 and part.lower().endswith(('.mp4', '.mov'))
+        ]
+        
+        print(f"DEBUG: TikTok - Valid video parts: {valid_video_parts}")
+        
+        if not valid_video_parts:
+            return jsonify({"error": "No valid video files found"}), 400
+            
+        if not TIKTOK_ACCESS_TOKEN or not TIKTOK_OPEN_ID:
+            return jsonify({"error": "TikTok credentials not configured"}), 500
+        
+        # Test TikTok connection
+        user_info = get_tiktok_user_info()
+        if not user_info or user_info.get('error', {}).get('code') != 'ok':
+            return jsonify({
+                "error": "TikTok authentication failed", 
+                "details": user_info,
+                "hint": "Check if your access token is valid and has video.upload scope"
+            }), 500
+        
+        total_parts = len(valid_video_parts)
+        upload_results = []
+        story_id = story_data.get("id", "unknown")
+        
+        for i, video_filename in enumerate(valid_video_parts, 1):
+            try:
+                video_path = os.path.join(base_dir, video_filename)
+                
+                if not os.path.exists(video_path):
+                    upload_results.append({
+                        "part": i,
+                        "filename": video_filename,
+                        "success": False,
+                        "error": f"File not found: {video_path}"
+                    })
+                    continue
+                
+                # Generate description for this part
+                description = generate_tiktok_description(story_title, i, total_parts)
+                
+                print(f"Uploading TikTok part {i}/{total_parts}...")
+                
+                # Choose upload method
+                if use_gcs_url:
+                    # Upload to GCS first, then use URL method
+                    public_url, gcs_filename = upload_to_gcs_temp(video_path, story_id, i)
+                    if public_url:
+                        success, result = upload_video_to_tiktok_from_url(public_url, description)
+                    else:
+                        success, result = False, "Failed to upload to GCS"
+                else:
+                    # Direct file upload
+                    success, result = upload_video_to_tiktok_inbox(video_path, description)
+                
+                if success:
+                    upload_results.append({
+                        "part": i,
+                        "filename": video_filename,
+                        "success": True,
+                        "publish_id": result['publish_id'],
+                        "description": description[:100] + "..." if len(description) > 100 else description,
+                        "status": result['status'],
+                        "message": result['message']
+                    })
+                    print(f"Successfully uploaded TikTok part {i}/{total_parts}")
+                else:
+                    upload_results.append({
+                        "part": i,
+                        "filename": video_filename,
+                        "success": False,
+                        "error": result
+                    })
+                    print(f"Failed to upload TikTok part {i}: {result}")
+                
+                # Add delay between uploads to avoid rate limits
+                if i < total_parts:
+                    print("Waiting 10 seconds before next upload...")
+                    time.sleep(10)
+                    
+            except Exception as e:
+                upload_results.append({
+                    "part": i,
+                    "filename": video_filename,
+                    "success": False,
+                    "error": str(e)
+                })
+                print(f"Unexpected error uploading TikTok part {i}: {str(e)}")
+        
+        successful_uploads = len([r for r in upload_results if r["success"]])
+        
+        status_code = 200
+        if successful_uploads == 0:
+            status_code = 400
+        elif successful_uploads < total_parts:
+            status_code = 207
+        
+        return jsonify({
+            "total_parts": total_parts,
+            "successful_uploads": successful_uploads,
+            "failed_uploads": total_parts - successful_uploads,
+            "results": upload_results,
+            "message": f"Uploaded {successful_uploads}/{total_parts} parts to TikTok inbox",
+            "note": "Users must check their TikTok inbox to review and post the videos"
+        }), status_code
+        
+    except Exception as e:
+        return jsonify({"error": f"TikTok batch upload failed: {str(e)}"}), 500
+
+@app.route("/tiktok_health", methods=["GET"])
+def tiktok_health():
+    """Check TikTok Content Posting API connection"""
+    try:
+        user_info = get_tiktok_user_info()
+        if user_info and user_info.get('error', {}).get('code') == 'ok':
+            return jsonify({
+                "status": "connected",
+                "user": user_info.get('data', {}),
+                "message": "TikTok Content Posting API connection successful",
+                "access_token_preview": TIKTOK_ACCESS_TOKEN[:20] + "..." if TIKTOK_ACCESS_TOKEN else "Not set",
+                "open_id": TIKTOK_OPEN_ID
+            })
+        else:
+            return jsonify({
+                "status": "error",
+                "message": "Failed to connect to TikTok API",
+                "details": user_info,
+                "troubleshooting": [
+                    "Check if access token is valid and not expired",
+                    "Ensure video.upload scope is approved for your app",
+                    "Verify Content Posting API product is added to your app"
+                ]
+            }), 500
+    except Exception as e:
+        return jsonify({
+            "status": "error", 
+            "message": f"TikTok health check failed: {str(e)}"
+        }), 500
+
+
 
 @app.route("/routes")
 def routes():
