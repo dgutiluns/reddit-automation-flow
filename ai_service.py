@@ -27,57 +27,6 @@ base_dir = os.path.dirname(__file__)
 
 # --- Video Duplication Detection ---
 
-# Configuration
-PROCESSED_STORIES_FILE = "processed_stories.json"
-MAX_STORIES_TO_CHECK = 3  # Maximum number of stories to check before giving up
-
-# YOUTUBE CONFIGURATIONS:
-# YouTube API Configuration
-YOUTUBE_SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
-YOUTUBE_API_SERVICE_NAME = "youtube"
-YOUTUBE_API_VERSION = "v3"
-YOUTUBE_CREDENTIALS_FILE = "youtube_credentials.pickle"  # Store your OAuth2 credentials here
-
-# INSTAGRAM CREDENTIALS:
-INSTAGRAM_ACCESS_TOKEN = "EAFdJxYmS8OgBPGn7lkXvQa95sv8caZAyVrXXZC0JK1m0eqntjYkr1LB7swBcgVRhAsjCUFpZCXhK58r50kk0a7jH8gWdcTUJVLCu1G2Eb2M7Ks52adG1CQBZBtPtURmscZCySSzraQVUPZCZADKPM8lTv9cEvesvQipuQMSUTZBUpdhtAcZB6nYOyFTCEZC4ZARIe0ZBm84izpBZB"  # <-- Page token for "Vana Bana"
-INSTAGRAM_ACCOUNT_ID = "17841476320877826"
-INSTAGRAM_API_BASE = "https://graph.facebook.com/v23.0"
-
-# GCS CREDENTIALS:
-GCS_CREDENTIALS_PATH = "/Users/diegogutierrez/Desktop/reddit-video-service/fast-tensor-467015-t9-2e032de3f47f.json"
-GCS_BUCKET_NAME = "reddit-audio-n8n"
-
-# TIKTOK CREDENTIALS:
-TIKTOK_CLIENT_KEY = "your_client_key_here"  # Replace with your actual client key
-TIKTOK_CLIENT_SECRET = "your_client_secret_here"  # Replace with your actual client secret
-TIKTOK_ACCESS_TOKEN = "your_access_token_here"  # From tiktok_tokens.txt (starts with 'act.')
-TIKTOK_OPEN_ID = "your_open_id_here"  # From tiktok_tokens.txt
-TIKTOK_API_BASE = "https://open.tiktokapis.com"
-
-# DEEPGRAM CREDENTIALS:
-DEEPGRAM_API_KEY = "597f05b9700111d51840862064280f8582369689"  # Replace with your actual key if different
-DEEPGRAM_VOICE = "aura-2-apollo-en"  # Male voice as requested
-DEEPGRAM_URL = "https://api.deepgram.com/v1/speak"
-
-ELEVENLABS_API_KEY = "sk_f00ce9024636631dcb714280b1645f76db1099b11938c054"  # Replace with your actual key
-ELEVENLABS_VOICE_ID = "pNInz6obpgDQGcFmaJgB"  # Adam - male voice, you can change this
-ELEVENLABS_URL = "https://api.elevenlabs.io/v1/text-to-speech"
-
-# ====================================================================================================
-
-# GOOGLE AUDIO CREDENTIALS AND GLOBAL VARIABLES
-
-USE_GOOGLE_TTS = True  # flip to False to fall back to gTTS
-
-# If you want this to be “permanent” without env vars, point to the JSON here:
-GOOGLE_TTS_CREDENTIALS_PATH = "/Users/diegogutierrez/Desktop/reddit-video-service/google-speech-credentials.json"
-
-# Voice preferences (pick any available voice you like)
-GOOGLE_TTS_LANGUAGE = "en-US"
-GOOGLE_TTS_VOICE_NAME = "en-US-Neural2-A"   # e.g., en-US-Standard-C, en-US-Neural2-F, etc.
-GOOGLE_TTS_SPEAKING_RATE = 1.0              # 0.25–4.0
-GOOGLE_TTS_PITCH = 0.0                      # -20.0–20.0 semitonesUSE_GOOGLE_TTS = True  # flip to False to fall back to gTTS
-
 
 # TESTING SCRIPTS
 
